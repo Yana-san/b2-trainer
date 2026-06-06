@@ -69,6 +69,26 @@ function useElapsed(){
 }
 async function blobToBase64(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onloadend=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(blob);});}
 
+// ─── JSON EXTRACTOR ──────────────────────────────────────────────────────────────
+// Gemini sometimes adds extra text around JSON — this extracts it robustly
+function extractJSON(raw) {
+  if (!raw) throw new Error("Empty response from Gemini");
+  // 1. Remove markdown code fences
+  let s = raw.replace(/```json\n?/gi,'').replace(/```\n?/g,'').trim();
+  // 2. Direct parse
+  try { return JSON.parse(s); } catch {}
+  // 3. Find first { ... } block
+  const m = s.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch(e2) {
+    // 4. Fix common issues: trailing commas, unquoted keys
+    const fixed = m[0]
+      .replace(/,\s*([}\]])/g, '$1')          // trailing commas
+      .replace(/([{,]\s*)([a-zA-Z_][\w]*)\s*:/g, '$1"$2":'); // unquoted keys
+    try { return JSON.parse(fixed); } catch {}
+  }}
+  throw new Error("Could not parse AI response as JSON. Raw: " + s.slice(0,120));
+}
+
 // ─── GOOGLE GEMINI API ────────────────────────────────────────────────────────
 // Free tier: no credit card, no expiration — just a Google account
 // Get key at: aistudio.google.com → Get API Key (free)
@@ -106,7 +126,7 @@ async function callGeminiAudio(apiKey,audioBlob,textPrompt){
 // ─── AI EVALUATION ────────────────────────────────────────────────────────────
 const DRILL_PROMPT=(target,focus)=>`You evaluate a Japanese English learner reading an English sentence aloud.
 Listen to the audio and evaluate accuracy and the grammar focus "${focus}".
-Reply ONLY with JSON (no markdown):
+Reply ONLY with a raw JSON object. No markdown, no explanation, no code fences, just the JSON object starting with { and ending with }:
 {"focusCorrect":true,"focusError":"exact error or null","focusErrorJa":"日本語説明またはnull","overallAccuracy":85,"otherErrors":[],"pass":true,"feedback":"1 English sentence","feedbackJa":"1文日本語"}
 pass=true if accuracy>=70 AND focusCorrect=true.
 
@@ -115,7 +135,7 @@ Grammar focus: ${focus}`;
 
 const SPEECH_PROMPT=(question)=>`You are a PROGOS/CEFR B2 examiner. Japanese learner: Interaction A2, Coherence B1, Accuracy B1.
 Listen to the spoken English response and evaluate DIRECTLY from the audio.
-Reply ONLY with JSON (no markdown):
+Reply ONLY with a raw JSON object. No markdown, no explanation, no code fences, just the JSON object starting with { and ending with }:
 {"overallLevel":"B1","interaction":{"score":"B1","evidence":"opening phrase you heard","comment":"2 sentences","commentJa":"2文"},"coherence":{"score":"B1","prepUsed":false,"connectors":["because"],"comment":"2 sentences","commentJa":"2文"},"accuracy":{"score":"B1","comment":"2 sentences","commentJa":"2文","corrections":[{"wrong":"phrase heard","right":"corrected","rule":"文法ルール"}]},"modelAnswer":"70-word PREP answer using student's OWN argument","tip":"1 actionable tip","tipJa":"日本語アドバイス"}
 Max 3 corrections. Under 20 words → all A2. modelAnswer MUST use student's own argument.
 
@@ -130,25 +150,26 @@ async function evalDrill(apiKey,audioBlob,liveText,target,focus){
     // FALLBACK: Use live speech recognition transcript
     raw=await callGemini(apiKey,DRILL_PROMPT(target,focus)+`\n\nSpeech recognition transcript: "${liveText||"(none)"}"`);
   }
-  return JSON.parse(raw.replace(/```json|```/g,"").trim());
+  return extractJSON(raw);
 }
 
 async function evalSpeech(apiKey,audioBlob,liveText,question){
   let raw;
-  try{
-    // PRIMARY: Direct audio evaluation
-    raw=await callGeminiAudio(apiKey,audioBlob,SPEECH_PROMPT(question));
-  }catch(e){
-    // FALLBACK: Use transcript
-    const wc=(liveText||"").trim().split(/\s+/).filter(Boolean).length;
-    raw=await callGemini(apiKey,SPEECH_PROMPT(question)+`\n\nSpeech recognition transcript (${wc} words): "${liveText||"(none)"}"`);
+  try{ raw=await callGeminiAudio(apiKey,audioBlob,SPEECH_PROMPT(question)); }
+  catch(e){
+    const wc=(liveText||"").trim().split(" ").filter(Boolean).length;
+    raw=await callGemini(apiKey,SPEECH_PROMPT(question)+"\nTranscript ("+wc+" words): \""+( liveText||"(none)")+"\"");
   }
-  return JSON.parse(raw.replace(/```json|```/g,"").trim());
+  try{ return extractJSON(raw); }
+  catch(e){
+    const raw2=await callGemini(apiKey,"Return ONLY valid JSON, no markdown.\n"+SPEECH_PROMPT(question)+"\nTranscript: \""+(liveText||"")+"\"");
+    return extractJSON(raw2);
+  }
 }
 
 async function generateQuestion(apiKey,topicName){
   const raw=await callGemini(apiKey,`Generate a PROGOS-style CEFR B1/B2 speaking question about ${topicName}. Reply ONLY with JSON: {"en":"...","ja":"..."}. Open-ended, Why/What/How type. No markdown.`);
-  return JSON.parse(raw.replace(/```json|```/g,"").trim());
+  return extractJSON(raw);
 }
 
 // ─── AUDIO RECORDER ───────────────────────────────────────────────────────────
