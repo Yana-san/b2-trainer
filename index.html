@@ -229,7 +229,9 @@ function RecordUI({rec,elapsed,maxSecs,minWords,onSubmit,onBack,header,showPREP}
   const handleStop=()=>{rec.stop();elapsed.stop();countdown.stop();};
   const handleSubmit=async()=>{setSubmitting(true);await onSubmit(rec);setSubmitting(false);};
   const words=(rec.liveText||"").trim().split(/\s+/).filter(Boolean).length;
-  const canSubmit=rec.status==="done"&&words>=minWords;
+  // 音声が録音されていればそのまま送信可（SafariはSpeechRecognition非対応のため語数チェックをスキップ）
+  const hasAudio=!!rec.audioBlob&&elapsed.secs>=3;
+  const canSubmit=rec.status==="done"&&(hasAudio||words>=minWords);
 
   return <div>
     {header}
@@ -255,7 +257,9 @@ function RecordUI({rec,elapsed,maxSecs,minWords,onSubmit,onBack,header,showPREP}
         </span>
       </div>
       {rec.status==="recording"&&maxSecs&&<div style={{fontSize:12,color:countdown.secs<=20?C.err:C.muted}}>残り {countdown.fmt(countdown.secs)}</div>}
-      {rec.status==="done"&&<div style={{fontSize:12,color:words>=minWords?C.ok:C.warn,fontWeight:700}}>{words}語 {words>=minWords?"✓":""}</div>}
+      {rec.status==="done"&&<div style={{fontSize:12,color:hasAudio?C.ok:C.warn,fontWeight:700}}>
+          {hasAudio?"✅ 音声録音済み":words+"語 "+(words>=minWords?"✓":"もう少し話してください")}
+        </div>}
     </div>
 
     {rec.errMsg&&<div style={{...S.card,background:"rgba(239,68,68,0.08)",borderColor:`${C.err}44`,fontSize:12,color:C.warn,marginBottom:10}}>{rec.errMsg}</div>}
@@ -294,7 +298,7 @@ function RecordUI({rec,elapsed,maxSecs,minWords,onSubmit,onBack,header,showPREP}
         <button onClick={()=>{rec.reset();elapsed.reset();countdown.reset();}} style={{...S.ghost,padding:"13px 0",textAlign:"center"}}>🔄 録り直す</button>
         <button onClick={handleSubmit} disabled={!canSubmit||submitting} style={{...S.btn(canSubmit&&!submitting?C.gold:"rgba(255,255,255,0.1)",canSubmit&&!submitting?"#111":C.muted),padding:"13px 0",fontSize:14}}>
           {submitting?<span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⏳</span>:"📊"}{" "}
-          {submitting?"Gemini AI評価中…":canSubmit?"AI評価を取得":"語数が足りません"}
+          {submitting?"Gemini AI評価中…":canSubmit?"AI評価を取得":"3秒以上話してください"}
         </button>
       </div>
     </div>}
