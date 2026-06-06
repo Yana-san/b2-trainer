@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>PROGOS B2 Trainer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:linear-gradient(160deg,#070e1c 0%,#0b1726 100%);color:#e2d5bf;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;}
+textarea,button,input{font-family:inherit;}
+button{cursor:pointer;}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-thumb{background:rgba(100,160,255,0.2);border-radius:2px;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback}=React;
+
+const C={bg:"#070e1c",card:"#132038",border:"rgba(100,160,255,0.13)",gold:"#c9a84c",goldL:"#e8c86a",blue:"#4488ff",teal:"#2dd4bf",cream:"#e2d5bf",muted:"#6a7f9a",ok:"#22c55e",warn:"#f59e0b",err:"#ef4444"};
+const S={
+  card:{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:"18px 20px",marginBottom:14},
+  btn:(bg=C.gold,fg="#111",fs=15)=>({background:bg,color:fg,border:"none",borderRadius:10,padding:"12px 22px",fontSize:fs,fontWeight:600,cursor:"pointer"}),
+  ghost:{background:"transparent",border:`1px solid ${C.border}`,color:C.cream,borderRadius:10,padding:"10px 18px",fontSize:14,cursor:"pointer"},
+  lbl:{fontSize:12,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6},
+};
+
+const TOPICS=[{id:"pharma",e:"🔬",n:"Science & Pharma",j:"科学・製薬"},{id:"ai",e:"🤖",n:"AI & Technology",j:"AI・テクノロジー"},{id:"business",e:"📈",n:"Business Strategy",j:"経営戦略"},{id:"history",e:"🏛️",n:"History",j:"歴史"},{id:"travel",e:"✈️",n:"Travel",j:"旅行"},{id:"food",e:"🍷",n:"Food & Drinks",j:"食・お酒"},{id:"books",e:"📚",n:"Books & Reading",j:"読書・文学"}];
+
+const DRILLS=[
+  {en:"The clinical trial demonstrates that this compound reduces inflammation significantly.",focus:"3単現のs"},
+  {en:"She has been developing this drug candidate for over five years.",focus:"現在完了進行形"},
+  {en:"The results were published last month in a peer-reviewed journal.",focus:"過去形"},
+  {en:"Artificial intelligence is transforming how we discover new medicines.",focus:"現在進行形"},
+  {en:"Many companies have already adopted machine learning in their R&D pipelines.",focus:"現在完了形"},
+  {en:"Each patient needs to provide informed consent before the study begins.",focus:"3単現のs"},
+  {en:"Historical evidence suggests that pandemics tend to occur in cycles.",focus:"3単現のs"},
+  {en:"The CEO announced that the merger would take effect next quarter.",focus:"時制の一致"},
+  {en:"There are several pieces of data that support this hypothesis.",focus:"可算・不可算"},
+  {en:"The strategy requires both short-term investment and long-term vision.",focus:"名詞の複数"},
+  {en:"One of the biggest challenges in drug development is ensuring patient safety.",focus:"主語と動詞の一致"},
+  {en:"AI-powered analytics have changed the way executives make strategic decisions.",focus:"現在完了形"},
+  {en:"The ancient Romans built infrastructure that still influences urban planning today.",focus:"過去形"},
+  {en:"Regulatory agencies require that pharmaceutical companies conduct post-market surveillance.",focus:"3単現のs"},
+  {en:"The board has decided to invest heavily in digital transformation over the next three years.",focus:"現在完了形"},
+];
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function tts(text,rate=0.85){window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.rate=rate;u.lang="en-US";window.speechSynthesis.speak(u);}
+
+function useTimer(init){
+  const[s,setS]=useState(init);const[on,setOn]=useState(false);const r=useRef(null);
+  useEffect(()=>{if(on&&s>0)r.current=setInterval(()=>setS(p=>p-1),1000);else clearInterval(r.current);return()=>clearInterval(r.current);},[on,s]);
+  const fmt=n=>`${String(Math.floor(n/60)).padStart(2,"0")}:${String(n%60).padStart(2,"0")}`;
+  return{secs:s,running:on,done:s===0,start:()=>setOn(true),stop:()=>setOn(false),reset:(v=init)=>{setOn(false);setS(v);},fmt};
+}
+function useElapsed(){
+  const[s,setS]=useState(0);const[on,setOn]=useState(false);const r=useRef(null);
+  useEffect(()=>{if(on)r.current=setInterval(()=>setS(p=>p+1),1000);else clearInterval(r.current);return()=>clearInterval(r.current);},[on]);
+  const fmt=n=>`${String(Math.floor(n/60)).padStart(2,"0")}:${String(n%60).padStart(2,"0")}`;
+  return{secs:s,start:()=>setOn(true),stop:()=>setOn(false),reset:()=>{setOn(false);setS(0);},fmt};
+}
+async function blobToBase64(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onloadend=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(blob);});}
+
+// ─── GOOGLE GEMINI API ────────────────────────────────────────────────────────
+// Free tier: no credit card, no expiration — just a Google account
+// Get key at: aistudio.google.com → Get API Key (free)
+const GEMINI_URL=key=>`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`;
+
+async function callGemini(apiKey,prompt){
+  const r=await fetch(GEMINI_URL(apiKey),{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:1400,temperature:0.3}}),
+  });
+  const d=await r.json();
+  if(d.error)throw new Error(d.error.message||JSON.stringify(d.error));
+  return d.candidates?.[0]?.content?.parts?.[0]?.text||"";
+}
+
+// Direct audio evaluation — no transcription, Gemini processes audio natively
+async function callGeminiAudio(apiKey,audioBlob,textPrompt){
+  const b64=await blobToBase64(audioBlob);
+  const mt=(audioBlob.type||"audio/mp4").split(";")[0];
+  const r=await fetch(GEMINI_URL(apiKey),{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      contents:[{parts:[
+        {inline_data:{mime_type:mt,data:b64}},
+        {text:textPrompt}
+      ]}],
+      generationConfig:{maxOutputTokens:1400,temperature:0.3}
+    }),
+  });
+  const d=await r.json();
+  if(d.error)throw new Error(d.error.message||JSON.stringify(d.error));
+  return d.candidates?.[0]?.content?.parts?.[0]?.text||"";
+}
+
+// ─── AI EVALUATION ────────────────────────────────────────────────────────────
+const DRILL_PROMPT=(target,focus)=>`You evaluate a Japanese English learner reading an English sentence aloud.
+Listen to the audio and evaluate accuracy and the grammar focus "${focus}".
+Reply ONLY with JSON (no markdown):
+{"focusCorrect":true,"focusError":"exact error or null","focusErrorJa":"日本語説明またはnull","overallAccuracy":85,"otherErrors":[],"pass":true,"feedback":"1 English sentence","feedbackJa":"1文日本語"}
+pass=true if accuracy>=70 AND focusCorrect=true.
+
+Target sentence: "${target}"
+Grammar focus: ${focus}`;
+
+const SPEECH_PROMPT=(question)=>`You are a PROGOS/CEFR B2 examiner. Japanese learner: Interaction A2, Coherence B1, Accuracy B1.
+Listen to the spoken English response and evaluate DIRECTLY from the audio.
+Reply ONLY with JSON (no markdown):
+{"overallLevel":"B1","interaction":{"score":"B1","evidence":"opening phrase you heard","comment":"2 sentences","commentJa":"2文"},"coherence":{"score":"B1","prepUsed":false,"connectors":["because"],"comment":"2 sentences","commentJa":"2文"},"accuracy":{"score":"B1","comment":"2 sentences","commentJa":"2文","corrections":[{"wrong":"phrase heard","right":"corrected","rule":"文法ルール"}]},"modelAnswer":"70-word PREP answer using student's OWN argument","tip":"1 actionable tip","tipJa":"日本語アドバイス"}
+Max 3 corrections. Under 20 words → all A2. modelAnswer MUST use student's own argument.
+
+Question asked: "${question}"`;
+
+async function evalDrill(apiKey,audioBlob,liveText,target,focus){
+  let raw;
+  try{
+    // PRIMARY: Direct audio evaluation (no transcription)
+    raw=await callGeminiAudio(apiKey,audioBlob,DRILL_PROMPT(target,focus));
+  }catch(e){
+    // FALLBACK: Use live speech recognition transcript
+    raw=await callGemini(apiKey,DRILL_PROMPT(target,focus)+`\n\nSpeech recognition transcript: "${liveText||"(none)"}"`);
+  }
+  return JSON.parse(raw.replace(/```json|```/g,"").trim());
+}
+
+async function evalSpeech(apiKey,audioBlob,liveText,question){
+  let raw;
+  try{
+    // PRIMARY: Direct audio evaluation
+    raw=await callGeminiAudio(apiKey,audioBlob,SPEECH_PROMPT(question));
+  }catch(e){
+    // FALLBACK: Use transcript
+    const wc=(liveText||"").trim().split(/\s+/).filter(Boolean).length;
+    raw=await callGemini(apiKey,SPEECH_PROMPT(question)+`\n\nSpeech recognition transcript (${wc} words): "${liveText||"(none)"}"`);
+  }
+  return JSON.parse(raw.replace(/```json|```/g,"").trim());
+}
+
+async function generateQuestion(apiKey,topicName){
+  const raw=await callGemini(apiKey,`Generate a PROGOS-style CEFR B1/B2 speaking question about ${topicName}. Reply ONLY with JSON: {"en":"...","ja":"..."}. Open-ended, Why/What/How type. No markdown.`);
+  return JSON.parse(raw.replace(/```json|```/g,"").trim());
+}
+
+// ─── AUDIO RECORDER ───────────────────────────────────────────────────────────
+function useRecorder(){
+  const[status,setStatus]=useState("idle");
+  const[errMsg,setErrMsg]=useState("");
+  const[audioBlob,setAudioBlob]=useState(null);
+  const[liveText,setLiveText]=useState("");
+  const mrRef=useRef(null);const streamRef=useRef(null);const chunksRef=useRef([]);
+  const srRef=useRef(null);const finalRef=useRef("");const keepRef=useRef(false);
+
+  const start=useCallback(async()=>{
+    setStatus("requesting");setErrMsg("");setAudioBlob(null);setLiveText("");finalRef.current="";
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+      streamRef.current=stream;
+      const mimes=["audio/mp4","audio/webm;codecs=opus","audio/webm","audio/ogg"];
+      const mime=mimes.find(t=>{try{return MediaRecorder.isTypeSupported(t);}catch{return false;}})||"";
+      const mr=new MediaRecorder(stream,mime?{mimeType:mime}:{});
+      chunksRef.current=[];
+      mr.ondataavailable=e=>{if(e.data?.size>0)chunksRef.current.push(e.data);};
+      mr.onstop=()=>{
+        const type=(mime.split(";")[0])||"audio/mp4";
+        setAudioBlob(new Blob(chunksRef.current,{type}));
+        streamRef.current?.getTracks().forEach(t=>t.stop());
+        setStatus("done");
+      };
+      mrRef.current=mr; mr.start(500);
+      // Simultaneous speech recognition for live captions
+      const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+      if(SR){
+        const sr=new SR();sr.continuous=true;sr.interimResults=true;sr.lang="en-US";
+        sr.onresult=e=>{let it="";for(let i=e.resultIndex;i<e.results.length;i++){const t=e.results[i][0].transcript;if(e.results[i].isFinal)finalRef.current+=t+" ";else it+=t;}setLiveText(finalRef.current+(it?" "+it:""));};
+        sr.onend=()=>{if(keepRef.current){try{sr.start();}catch{}}};
+        sr.onerror=()=>{};
+        srRef.current=sr;keepRef.current=true;try{sr.start();}catch{}
+      }
+      setStatus("recording");
+    }catch(e){
+      if(e.name==="NotAllowedError")setErrMsg("マイクの使用を許可してください。アドレスバーの🔒をタップ→マイク→許可");
+      else setErrMsg("マイクエラー: "+e.message);
+      setStatus("error");
+    }
+  },[]);
+
+  const stop=useCallback(()=>{
+    keepRef.current=false;
+    try{srRef.current?.stop();}catch{}
+    if(mrRef.current?.state==="recording")mrRef.current.stop();
+    else{streamRef.current?.getTracks().forEach(t=>t.stop());setStatus("done");}
+  },[]);
+
+  const reset=useCallback(()=>{
+    stop();setStatus("idle");setErrMsg("");setAudioBlob(null);setLiveText("");finalRef.current="";chunksRef.current=[];
+  },[stop]);
+
+  return{status,errMsg,audioBlob,liveText,start,stop,reset};
+}
+
+// ─── SHARED COMPONENTS ────────────────────────────────────────────────────────
+function Pill({children,color=C.gold}){return <span style={{background:`${color}22`,color,border:`1px solid ${color}44`,borderRadius:20,padding:"2px 10px",fontSize:12,fontWeight:600,whiteSpace:"nowrap"}}>{children}</span>;}
+
+function NavBar({screen,setScreen}){
+  const tabs=[{v:"home",e:"🏠",j:"ホーム"},{v:"morning",e:"🌅",j:"朝練"},{v:"prep",e:"🧠",j:"PREP"},{v:"sim",e:"🎙️",j:"録音"},{v:"settings",e:"⚙️",j:"設定"}];
+  return <div style={{position:"fixed",bottom:0,left:0,right:0,zIndex:200,background:"rgba(7,14,28,0.97)",backdropFilter:"blur(8px)",borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"space-around",padding:"6px 0 10px"}}>
+    {tabs.map(t=><button key={t.v} onClick={()=>setScreen(t.v)} style={{background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"4px 8px",opacity:screen===t.v?1:0.35,transform:screen===t.v?"scale(1.08)":"scale(1)"}}>
+      <span style={{fontSize:20}}>{t.e}</span><span style={{fontSize:10,color:screen===t.v?C.goldL:C.muted,fontWeight:screen===t.v?700:400}}>{t.j}</span>
+    </button>)}
+  </div>;
+}
+
+// ─── RECORDING UI ────────────────────────────────────────────────────────────
+function RecordUI({rec,elapsed,maxSecs,minWords,onSubmit,onBack,header,showPREP}){
+  const[submitting,setSubmitting]=useState(false);
+  const countdown=useTimer(maxSecs||120);
+  useEffect(()=>{if(rec.status==="recording"&&elapsed.secs>=maxSecs)rec.stop();},[elapsed.secs,rec.status,maxSecs]);
+  const handleStart=()=>{rec.start();elapsed.start();if(maxSecs)countdown.start();};
+  const handleStop=()=>{rec.stop();elapsed.stop();countdown.stop();};
+  const handleSubmit=async()=>{setSubmitting(true);await onSubmit(rec);setSubmitting(false);};
+  const words=(rec.liveText||"").trim().split(/\s+/).filter(Boolean).length;
+  const canSubmit=rec.status==="done"&&words>=minWords;
+
+  return <div>
+    {header}
+    {showPREP&&<div style={{display:"flex",gap:5,justifyContent:"center",marginBottom:10}}>
+      {[["P",C.gold,"結論"],["R",C.blue,"理由"],["E",C.teal,"例"],["P",C.gold,"結論"]].map(([k,c,j],i)=>
+        <div key={i} style={{padding:"4px 9px",borderRadius:8,background:`${c}18`,border:`1px solid ${c}44`,textAlign:"center",minWidth:40}}>
+          <div style={{fontSize:12,fontWeight:800,color:c}}>{k}</div>
+          <div style={{fontSize:9,color:C.muted}}>{j}</div>
+        </div>
+      )}
+    </div>}
+
+    {/* Status */}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,padding:"8px 14px",background:"rgba(239,68,68,0.08)",borderRadius:10,border:`1px solid ${C.err}33`}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{width:8,height:8,borderRadius:"50%",background:rec.status==="recording"?C.err:"rgba(255,255,255,0.15)",display:"inline-block",animation:rec.status==="recording"?"blink 1s ease-in-out infinite":"none"}}/>
+        <span style={{fontSize:12,fontWeight:700,color:rec.status==="recording"?C.err:rec.status==="done"?C.ok:C.muted}}>
+          {rec.status==="idle"&&"録音待機中"}
+          {rec.status==="requesting"&&"マイク許可確認中…"}
+          {rec.status==="recording"&&`🔴 録音中 ${elapsed.fmt(elapsed.secs)}`}
+          {rec.status==="done"&&`✅ 録音完了（${elapsed.fmt(elapsed.secs)}）`}
+          {rec.status==="error"&&"⚠️ エラー"}
+        </span>
+      </div>
+      {rec.status==="recording"&&maxSecs&&<div style={{fontSize:12,color:countdown.secs<=20?C.err:C.muted}}>残り {countdown.fmt(countdown.secs)}</div>}
+      {rec.status==="done"&&<div style={{fontSize:12,color:words>=minWords?C.ok:C.warn,fontWeight:700}}>{words}語 {words>=minWords?"✓":""}</div>}
+    </div>
+
+    {rec.errMsg&&<div style={{...S.card,background:"rgba(239,68,68,0.08)",borderColor:`${C.err}44`,fontSize:12,color:C.warn,marginBottom:10}}>{rec.errMsg}</div>}
+
+    {/* Idle */}
+    {(rec.status==="idle"||rec.status==="error")&&<div style={{textAlign:"center",marginBottom:14}}>
+      <button onClick={handleStart} style={{width:90,height:90,borderRadius:"50%",background:"rgba(239,68,68,0.15)",border:`3px solid ${C.err}`,fontSize:42,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 10px"}}>🎙️</button>
+      <div style={{fontSize:13,color:C.muted}}>ボタンを押して録音開始</div>
+    </div>}
+
+    {/* Requesting */}
+    {rec.status==="requesting"&&<div style={{textAlign:"center",padding:"20px 0",marginBottom:14,fontSize:13,color:C.warn}}>
+      ⏳ マイク許可ダイアログが表示されたら「許可」をタップ
+    </div>}
+
+    {/* Recording */}
+    {rec.status==="recording"&&<div>
+      <div style={{textAlign:"center",marginBottom:12}}>
+        <div style={{fontSize:72,animation:"pulse 1.2s ease-in-out infinite"}}>🎙️</div>
+        <div style={{fontSize:13,color:C.err,fontWeight:700,marginTop:6}}>話し終わったら停止を押してください</div>
+      </div>
+      {rec.liveText&&<div style={{...S.card,fontSize:13,lineHeight:1.7,marginBottom:10,borderColor:`${C.ok}44`}}>
+        <div style={{fontSize:10,color:C.ok,fontWeight:700,marginBottom:4}}>🎤 LIVE CAPTIONS（リアルタイム認識）</div>
+        {rec.liveText}
+      </div>}
+      <button onClick={handleStop} style={{...S.btn(C.err,"#fff"),width:"100%",padding:14,borderRadius:10,fontSize:15}}>⏹ 話し終わった → 停止</button>
+    </div>}
+
+    {/* Done */}
+    {rec.status==="done"&&<div>
+      {rec.liveText&&<div style={{...S.card,fontSize:13,lineHeight:1.7,marginBottom:10,borderColor:`${C.ok}44`}}>
+        <div style={{fontSize:10,color:C.ok,fontWeight:700,marginBottom:4}}>📝 SPEECH RECOGNITION（音声認識テキスト）</div>
+        {rec.liveText}
+      </div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:10}}>
+        <button onClick={()=>{rec.reset();elapsed.reset();countdown.reset();}} style={{...S.ghost,padding:"13px 0",textAlign:"center"}}>🔄 録り直す</button>
+        <button onClick={handleSubmit} disabled={!canSubmit||submitting} style={{...S.btn(canSubmit&&!submitting?C.gold:"rgba(255,255,255,0.1)",canSubmit&&!submitting?"#111":C.muted),padding:"13px 0",fontSize:14}}>
+          {submitting?<span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⏳</span>:"📊"}{" "}
+          {submitting?"Gemini AI評価中…":canSubmit?"AI評価を取得":"語数が足りません"}
+        </button>
+      </div>
+    </div>}
+
+    <button onClick={onBack} style={{...S.ghost,width:"100%",padding:9,marginTop:10,fontSize:12}}>← 戻る</button>
+  </div>;
+}
+
+// ─── EVAL CARD ────────────────────────────────────────────────────────────────
+function EvalCard({feedback,onNext,nextLabel}){
+  if(!feedback)return null;
+  const sc=s=>s==="B2"?C.ok:s==="B1"?C.warn:C.err;
+  return <div style={{padding:"20px 16px 90px"}}>
+    <div style={{...S.card,textAlign:"center",borderColor:`${sc(feedback.overallLevel)}55`,marginBottom:12}}>
+      <div style={{fontSize:11,color:C.muted,marginBottom:4}}>THIS RESPONSE</div>
+      <div style={{fontSize:44,fontWeight:900,color:sc(feedback.overallLevel),lineHeight:1}}>{feedback.overallLevel}</div>
+      <div style={{fontSize:12,color:C.muted,marginTop:4}}>{feedback.overallLevel==="B2"?"🌟 B2 Level reached!":feedback.overallLevel==="B1"?"📈 B1 — push toward B2":"🔄 Focus on corrections"}</div>
+    </div>
+    {["interaction","coherence","accuracy"].map(k=>{
+      const f=feedback[k];if(!f)return null;const col=sc(f.score);
+      return <div key={k} style={{...S.card,borderColor:`${col}44`,marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontWeight:700,fontSize:14,textTransform:"capitalize"}}>{k}</span>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {k==="coherence"&&feedback.coherence?.connectors?.length>0&&<span style={{fontSize:10,color:C.teal}}>✓ {feedback.coherence.connectors.slice(0,3).join("/")} </span>}
+            <Pill color={col}>{f.score}</Pill>
+          </div>
+        </div>
+        <div style={{fontSize:13,lineHeight:1.7,color:C.cream}}>{f.comment}</div>
+        <div style={{fontSize:12,color:C.muted,lineHeight:1.5,marginTop:4}}>{f.commentJa}</div>
+        {k==="interaction"&&f.evidence&&<div style={{marginTop:8,padding:"7px 12px",background:"rgba(255,255,255,0.04)",borderRadius:8,borderLeft:`3px solid ${col}`,fontSize:12,color:C.muted,fontStyle:"italic"}}>"{f.evidence}"</div>}
+        {k==="coherence"&&typeof f.prepUsed!=="undefined"&&<div style={{marginTop:8,fontSize:12,color:f.prepUsed?C.ok:C.warn}}>{f.prepUsed?"✅ PREP構造が確認できました":"⚠️ PREPの構造をより意識して話しましょう"}</div>}
+        {k==="accuracy"&&f.corrections?.length>0&&<div style={{marginTop:10,borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+          <div style={{fontSize:11,color:C.err,fontWeight:700,marginBottom:6}}>文法修正</div>
+          {f.corrections.map((c,i)=><div key={i} style={{marginBottom:8,padding:"8px 12px",background:"rgba(239,68,68,0.06)",borderRadius:8,borderLeft:`3px solid ${C.err}`}}>
+            <div style={{fontSize:12,marginBottom:2}}><span style={{color:C.err,textDecoration:"line-through"}}>{c.wrong}</span><span style={{color:C.muted}}> → </span><span style={{color:C.ok,fontWeight:700}}>{c.right}</span></div>
+            {c.rule&&<div style={{fontSize:11,color:C.muted}}>📌 {c.rule}</div>}
+          </div>)}
+        </div>}
+      </div>;
+    })}
+    {feedback.modelAnswer&&<div style={{...S.card,borderColor:`${C.teal}44`,marginBottom:12}}>
+      <div style={{fontSize:11,fontWeight:700,color:C.teal,marginBottom:4}}>🎯 MODEL ANSWER（あなたの内容ベース）</div>
+      <div style={{fontSize:11,color:C.muted,marginBottom:8}}>↑ あなたが話した内容をPREP構造で整えました</div>
+      <div style={{fontSize:13,lineHeight:1.85,color:C.cream}}>{feedback.modelAnswer}</div>
+      <button onClick={()=>tts(feedback.modelAnswer)} style={{...S.btn(C.teal,"#111",12),marginTop:10}}>🔊 聴いてシャドーイング</button>
+    </div>}
+    {feedback.tip&&<div style={{...S.card,background:"rgba(201,168,76,0.05)",borderColor:`${C.gold}33`,marginBottom:16}}>
+      <div style={{fontSize:11,fontWeight:700,color:C.gold,marginBottom:4}}>💡 NEXT STEP</div>
+      <div style={{fontSize:13,color:C.cream,lineHeight:1.6}}>{feedback.tipJa||feedback.tip}</div>
+    </div>}
+    <button onClick={onNext} style={{...S.btn(C.gold,"#111"),width:"100%",padding:14,borderRadius:10}}>{nextLabel||"➕ 次の問題へ"}</button>
+  </div>;
+}
+
+// ─── SETUP SCREEN ────────────────────────────────────────────────────────────
+function SetupScreen({onSave}){
+  const[key,setKey]=useState("");const[testing,setTesting]=useState(false);const[err,setErr]=useState("");
+  const test=async()=>{
+    if(!key.trim()){setErr("APIキーを入力してください");return;}
+    setTesting(true);setErr("");
+    try{
+      await callGemini(key.trim(),"Reply with the word: ok");
+      localStorage.setItem("b2_gemini_key",key.trim());
+      onSave(key.trim());
+    }catch(e){setErr("エラー: "+e.message);}
+    setTesting(false);
+  };
+  return <div style={{padding:"40px 20px",maxWidth:480,margin:"0 auto"}}>
+    <div style={{textAlign:"center",marginBottom:28}}>
+      <div style={{fontSize:48,marginBottom:12}}>🎙️</div>
+      <h1 style={{fontSize:22,fontWeight:700,color:C.goldL,marginBottom:8}}>PROGOS B2 Trainer</h1>
+      <div style={{fontSize:13,color:C.muted,lineHeight:1.7}}>Google Gemini APIを使用します。<br/>Googleアカウントさえあれば<strong style={{color:C.ok}}>完全無料</strong>で使えます。</div>
+    </div>
+
+    <div style={{...S.card,background:"rgba(34,197,94,0.06)",borderColor:`${C.ok}44`,marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,color:C.ok,marginBottom:8}}>✅ Google Gemini APIの特徴</div>
+      <div style={{fontSize:12,color:C.muted,lineHeight:1.8}}>
+        • クレジットカード不要<br/>
+        • 有効期限なし（永続無料）<br/>
+        • 1日250回まで無料<br/>
+        • Googleアカウントのみ必要
+      </div>
+    </div>
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:600,color:C.cream,marginBottom:12}}>📋 APIキー取得手順（2分）</div>
+      {[
+        {n:"1",t:"aistudio.google.com にアクセス",s:"Googleアカウントでログイン"},
+        {n:"2",t:"「Get API Key」をクリック",s:"画面左上または中央に表示"},
+        {n:"3",t:"「Create API Key」→「Copy」",s:"sk-...ではなく AIza...で始まるキー"},
+      ].map(x=><div key={x.n} style={{display:"flex",gap:12,marginBottom:10,alignItems:"flex-start"}}>
+        <span style={{width:22,height:22,borderRadius:"50%",background:C.blue,color:"#fff",fontSize:11,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{x.n}</span>
+        <div><div style={{fontSize:13,color:C.cream,fontWeight:600}}>{x.t}</div><div style={{fontSize:11,color:C.muted}}>{x.s}</div></div>
+      </div>)}
+    </div>
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:600,color:C.cream,marginBottom:8}}>APIキーを貼り付け</div>
+      <input value={key} onChange={e=>setKey(e.target.value)} placeholder="AIza..." type="password"
+        style={{width:"100%",background:"rgba(255,255,255,0.06)",border:`2px solid ${key?C.ok:C.blue}`,borderRadius:10,padding:"12px 14px",color:C.cream,fontSize:14,outline:"none",boxSizing:"border-box",marginBottom:8}}/>
+      {err&&<div style={{fontSize:12,color:C.err,marginBottom:8}}>⚠️ {err}</div>}
+      <button onClick={test} disabled={testing} style={{...S.btn(C.gold,"#111"),width:"100%",padding:14,borderRadius:10,fontSize:15}}>
+        {testing?"接続確認中…":"✓ 接続確認して開始"}
+      </button>
+    </div>
+
+    <div style={{fontSize:11,color:C.muted,textAlign:"center",lineHeight:1.6}}>
+      キーはこのデバイスのみに保存。外部には送信されません。<br/>
+      <a href="https://aistudio.google.com" target="_blank" style={{color:C.blue}}>aistudio.google.com</a>
+    </div>
+  </div>;
+}
+
+// ─── HOME SCREEN ─────────────────────────────────────────────────────────────
+function HomeScreen({setScreen,todayDone}){
+  const done=Object.values(todayDone).filter(Boolean).length;
+  return <div style={{padding:"24px 16px 90px"}}>
+    <div style={{marginBottom:16}}>
+      <div style={S.lbl}>PROGOS B1 → B2 TRAINER</div>
+      <h1 style={{fontSize:22,fontWeight:700,color:C.goldL}}>今日も一歩、B2へ 🎯</h1>
+    </div>
+    <div style={{...S.card,background:"rgba(34,197,94,0.06)",borderColor:`${C.ok}44`,marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:700,color:C.ok,marginBottom:4}}>✅ Gemini AI — 直接音声評価モード</div>
+      <div style={{fontSize:12,color:C.muted,lineHeight:1.6}}>
+        録音した音声をGeminiに直接送信。文字起こしなし、精度低下なし。<br/>
+        本日の進捗: <strong style={{color:C.gold}}>{done}/3 完了</strong>
+      </div>
+    </div>
+    {[
+      {key:"morning",icon:"🌅",title:"Accuracy Drill",tj:"文を録音 → AI文法評価（直接音声）",screen:"morning"},
+      {key:"prep",icon:"🧠",title:"PREP Speaking",tj:"2分録音 → Geminiが3項目採点",screen:"prep"},
+      {key:"sim",icon:"🎙️",title:"PROGOS Simulation",tj:"模擬試験 → AI自動評価",screen:"sim"},
+    ].map(s=><div key={s.key} onClick={()=>setScreen(s.screen)} style={{...S.card,display:"flex",alignItems:"center",gap:14,cursor:"pointer",borderColor:todayDone[s.key]?`${C.ok}55`:C.border}}>
+      <div style={{fontSize:26}}>{s.icon}</div>
+      <div style={{flex:1}}>
+        <div style={{fontWeight:600,fontSize:14,color:todayDone[s.key]?C.ok:C.cream}}>{s.title}</div>
+        <div style={{fontSize:11,color:C.muted,marginTop:2}}>{s.tj}</div>
+      </div>
+      <div style={{fontSize:22}}>{todayDone[s.key]?"✅":"›"}</div>
+    </div>)}
+    <div style={{...S.card,background:"rgba(201,168,76,0.05)",borderColor:`${C.gold}33`}}>
+      <div style={{fontSize:11,fontWeight:700,color:C.gold,marginBottom:4}}>🎯 Interaction重点ポイント（A2→B1）</div>
+      <div style={{fontSize:12,color:C.muted,lineHeight:1.7}}>
+        冒頭の一文で質問に直接答える：<br/>
+        • Why → <strong style={{color:C.cream}}>Because…</strong><br/>
+        • What → <strong style={{color:C.cream}}>The most important…</strong><br/>
+        • How → <strong style={{color:C.cream}}>By doing…</strong>
+      </div>
+    </div>
+  </div>;
+}
+
+// ─── MORNING SCREEN ───────────────────────────────────────────────────────────
+function MorningScreen({apiKey,onDone}){
+  const[idx,setIdx]=useState(()=>Math.floor(Math.random()*DRILLS.length));
+  const[done,setDone]=useState(0);const[correct,setCorrect]=useState(0);
+  const[phase,setPhase]=useState("ready");
+  const[result,setResult]=useState(null);
+  const[finished,setFinished]=useState(false);
+  const elapsed=useElapsed();const rec=useRecorder();
+  const drill=DRILLS[idx%DRILLS.length];const total=DRILLS.length;
+
+  const handleSubmit=async(r)=>{
+    setPhase("evaluating");
+    try{setResult(await evalDrill(apiKey,r.audioBlob,r.liveText,drill.en,drill.focus));}
+    catch(e){setResult({focusCorrect:false,focusError:"Error: "+e.message,focusErrorJa:"エラー",overallAccuracy:0,pass:false,feedback:"Please try again.",feedbackJa:"もう一度お試しください。"});}
+    setPhase("result");
+  };
+  const next=passed=>{
+    if(passed)setCorrect(c=>c+1);const n=done+1;setDone(n);
+    setPhase("ready");setResult(null);rec.reset();elapsed.reset();
+    if(n>=total){setFinished(true);onDone();}else setIdx(i=>(i+1)%total);
+  };
+
+  if(finished)return <div style={{padding:"40px 16px 90px",textAlign:"center"}}><div style={{fontSize:56,marginBottom:12}}>🎉</div><div style={{...S.card,textAlign:"center"}}><div style={{fontSize:42,fontWeight:900,color:correct>=total*0.8?C.ok:C.warn}}>{correct}/{total}</div><div style={{color:C.muted,marginTop:4}}>{correct>=total*0.8?"🌟 Excellent!":"💪 Keep going!"}</div></div></div>;
+
+  if(phase==="speaking")return <div style={{padding:"20px 16px 90px"}}>
+    <RecordUI rec={rec} elapsed={elapsed} maxSecs={30} minWords={5} onBack={()=>{rec.reset();elapsed.reset();setPhase("ready");}} onSubmit={handleSubmit} showPREP={false}
+      header={<div style={{...S.card,background:"rgba(45,212,191,0.07)",borderColor:`${C.teal}44`,marginBottom:12}}>
+        <div style={{fontSize:9,fontWeight:700,color:C.teal,letterSpacing:1,marginBottom:3}}>READ THIS SENTENCE</div>
+        <div style={{fontSize:15,fontWeight:600,lineHeight:1.6,color:C.cream,marginBottom:6}}>{drill.en}</div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}><Pill color={C.teal}>⚡ {drill.focus}</Pill><button onClick={()=>tts(drill.en)} style={{background:C.blue,border:"none",color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:10,cursor:"pointer"}}>🔊</button></div>
+      </div>}
+    />
+  </div>;
+
+  if(phase==="evaluating")return <div style={{padding:"80px 16px",textAlign:"center"}}><div style={{fontSize:32,display:"inline-block",animation:"spin 1.5s linear infinite",marginBottom:10}}>⏳</div><div style={{color:C.muted}}>Gemini AIが音声を評価中…</div></div>;
+
+  if(phase==="result"&&result)return <div style={{padding:"20px 16px 90px"}}>
+    <div style={{...S.card,background:"rgba(45,212,191,0.05)",borderColor:`${C.teal}33`,marginBottom:10}}>
+      <div style={{fontSize:11,color:C.teal,fontWeight:700,marginBottom:3}}>TARGET</div>
+      <div style={{fontSize:14,fontWeight:600}}>{drill.en}</div>
+    </div>
+    <div style={{...S.card,borderColor:`${result.pass?C.ok:C.warn}44`,marginBottom:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div><div style={{fontSize:30,fontWeight:900,color:result.pass?C.ok:C.warn}}>{result.overallAccuracy}%</div><div style={{fontSize:10,color:C.muted}}>accuracy</div></div>
+        <div style={{textAlign:"right"}}><div style={{fontSize:14,fontWeight:700,color:result.focusCorrect?C.ok:C.err}}>{result.focusCorrect?"✅":"❌"} {drill.focus}</div></div>
+      </div>
+      {result.focusError&&<div style={{padding:"8px 12px",background:"rgba(239,68,68,0.08)",borderRadius:8,borderLeft:`3px solid ${C.err}`,marginBottom:8}}><div style={{fontSize:12,color:C.err}}>{result.focusError}</div>{result.focusErrorJa&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>{result.focusErrorJa}</div>}</div>}
+      <div style={{fontSize:13,color:result.pass?C.ok:C.muted}}>{result.feedback}</div>
+      {result.feedbackJa&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>{result.feedbackJa}</div>}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <button onClick={()=>{rec.reset();elapsed.reset();setPhase("speaking");setResult(null);}} style={{...S.btn("rgba(239,68,68,0.12)",C.err,14),...{border:`1px solid ${C.err}44`,borderRadius:10,padding:"13px 0"}}}>🔄 もう一度</button>
+      <button onClick={()=>next(result.pass)} style={{...S.btn(result.pass?C.ok:C.warn,"#111",14),...{borderRadius:10,padding:"13px 0"}}}>{result.pass?"✓ 次へ":"→ スキップ"}</button>
+    </div>
+  </div>;
+
+  return <div style={{padding:"20px 16px 90px"}}>
+    <div style={S.lbl}>🌅 ACCURACY DRILL — {done}/{total}</div>
+    <div style={{...S.card,padding:"18px",marginBottom:14}}>
+      <div style={{fontSize:11,color:C.muted,marginBottom:6}}>READ ALOUD</div>
+      <div style={{fontSize:16,fontWeight:600,lineHeight:1.85,color:C.cream,marginBottom:12}}>"{drill.en}"</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button onClick={()=>tts(drill.en)} style={{...S.btn(C.blue,"#fff",12)}}>🔊 Listen</button><Pill color={C.teal}>⚡ {drill.focus}</Pill></div>
+    </div>
+    <button onClick={()=>setPhase("speaking")} style={{...S.btn(C.gold,"#111"),width:"100%",padding:15,borderRadius:10,fontSize:15}}>🎙️ 話す → Gemini AI評価</button>
+  </div>;
+}
+
+// ─── PREP SCREEN ─────────────────────────────────────────────────────────────
+function PrepScreen({apiKey,selectedTopics,onDone}){
+  const[phase,setPhase]=useState("select");
+  const[question,setQuestion]=useState("");const[questionJa,setQuestionJa]=useState("");
+  const[feedback,setFeedback]=useState(null);const[count,setCount]=useState(0);
+  const elapsed=useElapsed();const speakTimer=useTimer(120);const rec=useRecorder();
+
+  const genQ=async tid=>{
+    setPhase("loadQ");
+    const t=TOPICS.find(x=>x.id===tid);
+    try{const p=await generateQuestion(apiKey,t.n);setQuestion(p.en||"");setQuestionJa(p.ja||"");}
+    catch{
+      const fb={pharma:"What is the most significant challenge in pharmaceutical development today?",ai:"How has AI changed decision-making in your industry?",business:"What leadership qualities are essential for rapid change?",history:"How can history help modern leaders?",travel:"What cultural experience most changed your perspective?",food:"How does food culture reflect regional identity?",books:"What book most influenced your thinking?"};
+      setQuestion(fb[tid]||"What change in your field has had the biggest impact recently?");
+      setQuestionJa("この質問に英語でお答えください。");
+    }
+    setPhase("question");speakTimer.reset(120);speakTimer.start();
+  };
+
+  const handleSubmit=async(r)=>{
+    setPhase("evaluating");
+    try{setFeedback(await evalSpeech(apiKey,r.audioBlob,r.liveText,question));}
+    catch(e){setFeedback({overallLevel:"B1",interaction:{score:"B1",evidence:"(error)",comment:"Error: "+e.message,commentJa:"エラー"},coherence:{score:"B1",prepUsed:false,connectors:[],comment:"",commentJa:""},accuracy:{score:"B1",comment:"",commentJa:"",corrections:[]},modelAnswer:"",tip:"Try again.",tipJa:""});}
+    setPhase("feedback");if(count+1>=3)onDone();setCount(c=>c+1);
+  };
+  const reset=()=>{setPhase("select");setFeedback(null);setQuestion("");setQuestionJa("");rec.reset();elapsed.reset();speakTimer.reset();};
+
+  if(phase==="select")return <div style={{padding:"20px 16px 90px"}}>
+    <div style={S.lbl}>🧠 PREP SPEAKING</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      {TOPICS.filter(t=>selectedTopics.includes(t.id)).map(t=><button key={t.id} onClick={()=>genQ(t.id)} style={{...S.card,cursor:"pointer",textAlign:"center",padding:"16px 10px",margin:0}}>
+        <div style={{fontSize:28,marginBottom:6}}>{t.e}</div><div style={{fontSize:13,fontWeight:600}}>{t.n}</div><div style={{fontSize:11,color:C.muted,marginTop:2}}>{t.j}</div>
+      </button>)}
+      <button onClick={()=>genQ(selectedTopics[Math.floor(Math.random()*selectedTopics.length)])} style={{...S.card,cursor:"pointer",textAlign:"center",padding:"16px 10px",margin:0,border:`1px solid ${C.gold}44`,background:"rgba(201,168,76,0.06)"}}>
+        <div style={{fontSize:28,marginBottom:6}}>🎲</div><div style={{fontSize:13,fontWeight:600,color:C.goldL}}>Random</div>
+      </button>
+    </div>
+  </div>;
+
+  if(phase==="loadQ"||phase==="evaluating")return <div style={{padding:"80px 16px",textAlign:"center"}}><div style={{fontSize:44,display:"inline-block",animation:"spin 1.5s linear infinite",marginBottom:16}}>⏳</div><div style={{color:C.muted}}>{phase==="loadQ"?"質問を生成中…":"Gemini AIが音声を評価中…"}</div></div>;
+
+  if(phase==="question")return <div style={{padding:"20px 16px 90px"}}>
+    <div style={{...S.card,padding:"20px 18px",marginBottom:12}}>
+      <div style={S.lbl}>QUESTION</div>
+      <div style={{fontSize:16,fontWeight:600,lineHeight:1.8,marginBottom:12}}>{question}</div>
+      <button onClick={()=>tts(question)} style={{...S.btn(C.blue,"#fff",13)}}>🔊 聞く</button>
+      <div style={{fontSize:13,color:C.muted,borderTop:`1px solid ${C.border}`,marginTop:12,paddingTop:12,lineHeight:1.6}}>{questionJa}</div>
+    </div>
+    <div style={{...S.card,background:"rgba(201,168,76,0.05)",borderColor:`${C.gold}33`,marginBottom:14,fontSize:12,color:C.muted}}>
+      <strong style={{color:C.gold}}>PREP: </strong>P（結論）→ R（理由）→ E（具体例）→ P（結論）<br/>
+      <span style={{color:C.cream}}>I believe…</span> / Because… / Additionally… / Therefore…
+    </div>
+    <button onClick={()=>{rec.reset();elapsed.reset();setPhase("speaking");}} style={{...S.btn(C.gold,"#111"),width:"100%",padding:15,borderRadius:10,fontSize:15}}>🎙️ 話す → AI評価（2分）</button>
+  </div>;
+
+  if(phase==="speaking")return <div style={{padding:"20px 16px 90px"}}>
+    <div style={{position:"sticky",top:0,background:C.bg,paddingBottom:10,zIndex:10}}>
+      <div style={{fontSize:10,fontWeight:700,color:C.blue,marginBottom:3}}>QUESTION</div>
+      <div style={{fontSize:13,fontWeight:600,lineHeight:1.5,color:C.cream,marginBottom:6}}>{question}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",gap:4}}>
+          {[["P",C.gold],["R",C.blue],["E",C.teal],["P",C.gold]].map(([k,c],i)=><div key={i} style={{padding:"3px 8px",borderRadius:6,background:`${c}18`,border:`1px solid ${c}44`,fontSize:11,fontWeight:800,color:c}}>{k}</div>)}
+        </div>
+        <div style={{fontSize:20,fontWeight:900,color:speakTimer.secs<=20?C.err:C.gold}}>{speakTimer.fmt(speakTimer.secs)}</div>
+      </div>
+    </div>
+    <RecordUI rec={rec} elapsed={elapsed} maxSecs={120} minWords={25} onBack={()=>{rec.reset();elapsed.reset();speakTimer.reset();setPhase("question");}} onSubmit={handleSubmit} showPREP={false} header={null}/>
+  </div>;
+
+  if(phase==="feedback")return <EvalCard feedback={feedback} onNext={reset} nextLabel={`➕ 次の問題へ${count>=3?" 🎉":""}`}/>;
+  return null;
+}
+
+// ─── SIMULATION SCREEN ───────────────────────────────────────────────────────
+function SimScreen({apiKey,selectedTopics,onDone}){
+  const[phase,setPhase]=useState("intro");
+  const[question,setQuestion]=useState("");const[questionJa,setQuestionJa]=useState("");
+  const[feedback,setFeedback]=useState(null);
+  const prepTimer=useTimer(30);const speakTimer=useTimer(120);
+  const elapsed=useElapsed();const rec=useRecorder();
+  useEffect(()=>{if(phase==="prep"&&prepTimer.done)setPhase("speaking");},[prepTimer.done,phase]);
+
+  const genQ=async()=>{
+    setPhase("loadQ");
+    const ids=selectedTopics.length?selectedTopics:["business"];
+    const tid=ids[Math.floor(Math.random()*ids.length)];
+    const t=TOPICS.find(x=>x.id===tid)||TOPICS[0];
+    try{const p=await generateQuestion(apiKey,t.n);setQuestion(p.en||"");setQuestionJa(p.ja||"");}
+    catch{setQuestion("What do you think is the most important skill for professionals over the next ten years, and why?");setQuestionJa("今後10年間で専門家が最も身につけるべきスキルは何だと思いますか？");}
+    setPhase("prep");prepTimer.reset(30);
+  };
+
+  const handleSubmit=async(r)=>{
+    setPhase("evaluating");
+    try{setFeedback(await evalSpeech(apiKey,r.audioBlob,r.liveText,question));}
+    catch(e){setFeedback({overallLevel:"B1",interaction:{score:"B1",evidence:"(error)",comment:"Error: "+e.message,commentJa:"エラー"},coherence:{score:"B1",prepUsed:false,connectors:[],comment:"",commentJa:""},accuracy:{score:"B1",comment:"",commentJa:"",corrections:[]},modelAnswer:"",tip:"Try again.",tipJa:""});}
+    setPhase("done");onDone();
+  };
+  const reset=()=>{setPhase("intro");setFeedback(null);setQuestion("");setQuestionJa("");rec.reset();elapsed.reset();prepTimer.reset();speakTimer.reset();};
+
+  if(phase==="intro")return <div style={{padding:"24px 16px 90px"}}>
+    <div style={{fontSize:18,fontWeight:600,marginBottom:14}}>🎙️ PROGOS模擬試験</div>
+    <div style={{...S.card,marginBottom:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,textAlign:"center"}}>
+        {[{t:"準備",s:"30秒",c:C.gold},{t:"話す",s:"2分",c:C.err},{t:"AI採点",s:"即時",c:C.teal}].map(x=><div key={x.t} style={{padding:"12px 4px",background:"rgba(255,255,255,0.03)",borderRadius:10}}><div style={{fontSize:10,color:x.c,fontWeight:700,marginBottom:3}}>{x.t}</div><div style={{fontSize:15,fontWeight:800}}>{x.s}</div></div>)}
+      </div>
+    </div>
+    <div style={{...S.card,background:"rgba(239,68,68,0.05)",borderColor:`${C.err}33`,fontSize:13,color:C.muted,lineHeight:1.7,marginBottom:16}}>
+      🎯 <strong>Interaction（最重要）</strong>：冒頭の一文で直接答える<br/>
+      Why→Because / What→The most important / How→By doing
+    </div>
+    <button onClick={genQ} style={{...S.btn(C.gold,"#111"),width:"100%",padding:15,borderRadius:10,fontSize:15}}>🎯 問題を生成してスタート</button>
+  </div>;
+
+  if(phase==="loadQ"||phase==="evaluating")return <div style={{padding:"80px 16px",textAlign:"center"}}><div style={{fontSize:44,display:"inline-block",animation:"spin 1.5s linear infinite",marginBottom:16}}>⏳</div><div style={{color:C.muted}}>{phase==="loadQ"?"問題を生成中…":"Gemini AIが音声を評価中…"}</div></div>;
+
+  if(phase==="prep")return <div style={{padding:"24px 16px 90px",textAlign:"center"}}>
+    <div style={S.lbl}>🟡 PREPARATION TIME</div>
+    <div style={{fontSize:64,fontWeight:900,color:prepTimer.secs<=10?C.err:C.gold,fontVariantNumeric:"tabular-nums",margin:"12px 0 8px",lineHeight:1}}>{prepTimer.fmt(prepTimer.secs)}</div>
+    <div style={{...S.card,textAlign:"left",marginBottom:12}}>
+      <div style={{fontSize:15,fontWeight:600,lineHeight:1.8,marginBottom:8}}>{question}</div>
+      <div style={{fontSize:13,color:C.muted,lineHeight:1.6,marginBottom:10}}>{questionJa}</div>
+      <button onClick={()=>tts(question)} style={{...S.btn(C.blue,"#fff",12)}}>🔊 聞く</button>
+    </div>
+    {!prepTimer.running&&<button onClick={prepTimer.start} style={{...S.btn(C.gold,"#111"),width:"100%",padding:14,borderRadius:10,marginBottom:10}}>▶ タイマースタート</button>}
+    <button onClick={()=>{rec.reset();elapsed.reset();setPhase("speaking");}} style={{...S.ghost,width:"100%",padding:12}}>✓ 準備完了 → 今すぐ話す</button>
+  </div>;
+
+  if(phase==="speaking")return <div style={{padding:"20px 16px 90px"}}>
+    <div style={{position:"sticky",top:0,background:C.bg,paddingBottom:10,zIndex:10}}>
+      <div style={{fontSize:10,fontWeight:700,color:C.err,marginBottom:3}}>QUESTION</div>
+      <div style={{fontSize:13,fontWeight:600,lineHeight:1.5,color:C.cream,marginBottom:3}}>{question}</div>
+      <div style={{fontSize:11,color:C.muted,marginBottom:6}}>{questionJa}</div>
+      <div style={{fontSize:22,fontWeight:900,color:speakTimer.secs<=20?C.err:C.gold}}>{speakTimer.fmt(speakTimer.secs)}</div>
+    </div>
+    <RecordUI rec={rec} elapsed={elapsed} maxSecs={120} minWords={35} onBack={()=>{rec.reset();elapsed.reset();speakTimer.reset();setPhase("prep");}} onSubmit={handleSubmit} showPREP={false} header={null}/>
+  </div>;
+
+  if(phase==="done")return <EvalCard feedback={feedback} onNext={reset} nextLabel="🔄 もう一問練習する"/>;
+  return null;
+}
+
+// ─── SETTINGS ────────────────────────────────────────────────────────────────
+function SettingsScreen({onClearKey,selectedTopics,setSelectedTopics}){
+  return <div style={{padding:"24px 16px 90px"}}>
+    <div style={S.lbl}>⚙️ SETTINGS 設定</div>
+    <div style={S.card}>
+      <div style={{fontSize:14,fontWeight:600,marginBottom:8}}>トピック選択</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+        {TOPICS.map(t=>{const on=selectedTopics.includes(t.id);return <button key={t.id} onClick={()=>{const n=on&&selectedTopics.length>1?selectedTopics.filter(x=>x!==t.id):[...selectedTopics.filter(x=>x!==t.id),t.id];setSelectedTopics(n);}} style={{padding:"6px 14px",borderRadius:20,fontSize:13,fontWeight:500,cursor:"pointer",border:`1px solid ${on?C.gold:C.border}`,background:on?"rgba(201,168,76,0.18)":"transparent",color:on?C.goldL:C.muted}}>{t.e} {t.j}</button>;})}
+      </div>
+    </div>
+    <div style={{...S.card,marginBottom:14}}>
+      <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>Gemini APIキー</div>
+      <div style={{fontSize:12,color:C.muted,marginBottom:10}}>キーを変更する場合はリセットしてください</div>
+      <button onClick={onClearKey} style={{...S.ghost,fontSize:12,padding:"8px 14px"}}>🔑 APIキーをリセット</button>
+    </div>
+    <div style={{...S.card,background:"rgba(68,136,255,0.06)",borderColor:`${C.blue}33`,fontSize:12,color:C.muted,lineHeight:1.7}}>
+      <strong style={{color:C.blue}}>Gemini API 無料ティア</strong><br/>
+      • Gemini 2.5 Flash: 1日250リクエスト<br/>
+      • クレジットカード不要・有効期限なし<br/>
+      • 1回の練習セッション ≈ 1〜3リクエスト<br/>
+      • 1日の練習に十分な量
+    </div>
+  </div>;
+}
+
+// ─── MAIN APP ────────────────────────────────────────────────────────────────
+function App(){
+  const[apiKey,setApiKey]=useState(()=>localStorage.getItem("b2_gemini_key")||"");
+  const[screen,setScreen]=useState("home");
+  const[selectedTopics,setSelectedTopics]=useState(["pharma","ai","business"]);
+  const[todayDone,setTodayDone]=useState({morning:false,prep:false,sim:false});
+  const saveKey=k=>{localStorage.setItem("b2_gemini_key",k);setApiKey(k);};
+  const clearKey=()=>{localStorage.removeItem("b2_gemini_key");setApiKey("");};
+  const markDone=k=>setTodayDone(p=>({...p,[k]:true}));
+
+  if(!apiKey)return <SetupScreen onSave={saveKey}/>;
+  return <div style={{minHeight:"100vh",background:`linear-gradient(160deg,${C.bg} 0%,#0b1726 100%)`,color:C.cream}}>
+    {screen==="home"    &&<HomeScreen setScreen={setScreen} todayDone={todayDone}/>}
+    {screen==="morning" &&<MorningScreen apiKey={apiKey} onDone={()=>markDone("morning")}/>}
+    {screen==="prep"    &&<PrepScreen apiKey={apiKey} selectedTopics={selectedTopics} onDone={()=>markDone("prep")}/>}
+    {screen==="sim"     &&<SimScreen apiKey={apiKey} selectedTopics={selectedTopics} onDone={()=>markDone("sim")}/>}
+    {screen==="settings"&&<SettingsScreen onClearKey={clearKey} selectedTopics={selectedTopics} setSelectedTopics={setSelectedTopics}/>}
+    <NavBar screen={screen} setScreen={setScreen}/>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
