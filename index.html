@@ -147,20 +147,17 @@ async function geminiRequest(apiKey,body,attempt=0){
     const isRate=d.error.code===429||d.error.status==="RESOURCE_EXHAUSTED"||(d.error.message||"").includes("Quota exceeded");
     if(isRate){
       if(attempt===0){
-        // 1回目: まず別モデルに切り替えて即リトライ
+        // 1回目: 別モデルに切り替えて待機後リトライ
         currentModelIdx=Math.min(currentModelIdx+1,MODELS.length-1);
-        return geminiRequest(apiKey,body,attempt+1);
-      } else if(attempt===1){
-        // 2回目: 待機してリトライ
         const secs=parseWaitSecs(d.error.message);
         notifyWait(secs);
         await new Promise(res=>setTimeout(res,secs*1000));
         notifyWait(0);
-        currentModelIdx=0; // モデルをリセット
         return geminiRequest(apiKey,body,attempt+1);
       } else {
-        // 3回目: 諦めてユーザーに通知
+        // 2回目: 諦めてユーザーに通知
         notifyWait(0);
+        currentModelIdx=0;
         throw new Error("RATE_LIMIT_FINAL");
       }
     }
@@ -435,17 +432,37 @@ function EvalCard({feedback,onNext,nextLabel}){
 // ─── SETUP SCREEN ────────────────────────────────────────────────────────────
 function SetupScreen({onSave}){
   const[key,setKey]=useState("");const[testing,setTesting]=useState(false);const[err,setErr]=useState("");
+  const[waitCD,setWaitCD]=useState(0);
+  useEffect(()=>{
+    const h=e=>{
+      const s=e.detail;
+      setWaitCD(s);
+      if(s>0){const t=setInterval(()=>setWaitCD(c=>{if(c<=1){clearInterval(t);return 0;}return c-1;}),1000);return()=>clearInterval(t);}
+    };
+    window.addEventListener('gemini_wait',h);
+    return()=>window.removeEventListener('gemini_wait',h);
+  },[]);
+
   const test=async()=>{
     if(!key.trim()){setErr("APIキーを入力してください");return;}
     setTesting(true);setErr("");
     try{
-      await callGemini(key.trim(),"Reply with the word: ok");
+      await callGemini(key.trim(),"ok");
       localStorage.setItem("b2_gemini_key",key.trim());
       onSave(key.trim());
-    }catch(e){setErr("エラー: "+e.message);}
+    }catch(e){
+      if(e.message==="RATE_LIMIT_FINAL"){
+        setErr("APIキーは正しいですが、一時的にAPI制限中です。1分待ってから「接続確認」を再度タップしてください。");
+      } else {
+        setErr("エラー: "+e.message);
+      }
+    }
     setTesting(false);
   };
   return <div style={{padding:"40px 20px",maxWidth:480,margin:"0 auto"}}>
+    {waitCD>0&&<div style={{position:"fixed",top:0,left:0,right:0,zIndex:9999,background:"rgba(245,158,11,0.95)",padding:"12px 16px",textAlign:"center"}}>
+      <div style={{fontSize:14,fontWeight:800,color:"#111"}}>⏳ {waitCD}秒後に自動再試行… そのままお待ちください</div>
+    </div>}
     <div style={{textAlign:"center",marginBottom:28}}>
       <div style={{fontSize:48,marginBottom:12}}>🎙️</div>
       <h1 style={{fontSize:22,fontWeight:700,color:C.goldL,marginBottom:8}}>PROGOS B2 Trainer</h1>
