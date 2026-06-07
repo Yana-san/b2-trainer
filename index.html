@@ -125,7 +125,7 @@ function extractJSON(raw) {
 
 // ─── GOOGLE GEMINI API ────────────────────────────────────────────────────────
 // モデル設定 — gemini-2.0-flash はレート制限が緩い（無料: 15 RPM）
-const MODELS=["gemini-2.0-flash","gemini-1.5-flash"];
+const MODELS=["gemini-2.0-flash","gemini-2.0-flash-lite","gemini-2.5-flash"];
 const GEMINI_URL=(key,model)=>`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 const GEMINI_CFG={maxOutputTokens:2500,temperature:0.3};
 let currentModelIdx=0; // 自動フォールバック用
