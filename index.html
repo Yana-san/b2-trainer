@@ -142,29 +142,49 @@ function isOverload(d){
   return d.error&&((d.error.message||"").includes("high demand")||(d.error.message||"").includes("overloaded")||d.error.code===503);
 }
 
-// 1モデルに対してリクエスト送信
+// 1モデルに対してリクエスト送信（ネットワークエラーを過負荷エラーとして扱う）
 async function fetchModel(apiKey,model,body){
-  const r=await fetch(GEMINI_URL(apiKey,model),{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({...body,generationConfig:GEMINI_CFG}),
-  });
-  return r.json();
-}
-
-// 接続テスト — 全モデルを順番に試す
-async function testConnection(apiKey){
-  const testBody={contents:[{parts:[{text:"ok"}]}],generationConfig:{maxOutputTokens:5,temperature:0}};
-  for(const model of GEMINI_MODELS){
+  try{
     const r=await fetch(GEMINI_URL(apiKey,model),{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(testBody),
+      body:JSON.stringify({...body,generationConfig:GEMINI_CFG}),
     });
-    const d=await r.json();
-    if(!d.error){ return model; }  // 成功したモデルを返す
-    if(isRateLimit(d)) throw new Error("RATE_LIMIT");
-    // 過負荷・モデル未対応 → 次のモデルを試す
+    return r.json();
+  }catch(e){
+    // ネットワーク失敗→次のモデルへフォールバックさせる
+    return {error:{code:503,message:"Load failed: "+e.message,status:"UNAVAILABLE"}};
   }
-  throw new Error("全モデルに接続できません。しばらく待ってから再試行してください。");
+}
+
+// 接続テスト — 全モデルを順番に試す（ネットワークエラーも考慮）
+async function testConnection(apiKey){
+  const testBody={contents:[{parts:[{text:"ok"}]}],generationConfig:{maxOutputTokens:5,temperature:0}};
+  let lastErr="";
+  let networkFail=0;
+  for(const model of GEMINI_MODELS){
+    try{
+      const r=await fetch(GEMINI_URL(apiKey,model),{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(testBody),
+      });
+      const d=await r.json();
+      if(!d.error){ return model; }
+      if(isRateLimit(d)) throw new Error("RATE_LIMIT");
+      lastErr=d.error.message||"unknown";
+    }catch(e){
+      if(e.message==="RATE_LIMIT") throw e;
+      // fetch自体の失敗（ネットワーク・CORS等）
+      if(e.name==="TypeError"||(e.message||"").includes("Load failed")||(e.message||"").includes("fetch")){
+        networkFail++;
+        lastErr="NETWORK";
+      } else {
+        lastErr=e.message;
+      }
+    }
+  }
+  if(networkFail===GEMINI_MODELS.length) throw new Error("NETWORK_FAIL");
+  throw new Error("API_FAIL: "+lastErr);
 }
 
 // 通常リクエスト — モデルフォールバック＋レート制限時自動待機
@@ -478,10 +498,17 @@ function SetupScreen({onSave}){
     }catch(e){
       if(e.message==="RATE_LIMIT"){
         setErr("⚠️ API制限中です。1分待ってから再度タップしてください。（APIキーは正しいです）");
-      } else if(e.message.includes("API_KEY_INVALID")||e.message.includes("invalid")){
+      } else if(e.message==="NETWORK_FAIL"){
+        setErr("❌ ネットワークエラー。以下をご確認ください：
+① Safariのプライベートブラウジングをオフにする
+② インターネット接続を確認する
+③ Safariの設定→プライバシー→サイト越えトラッキングをオフにする");
+      } else if((e.message||"").includes("API_KEY_INVALID")||(e.message||"").includes("invalid")){
         setErr("❌ APIキーが正しくありません。aistudio.google.comで確認してください。");
       } else {
-        setErr("❌ 接続エラー: "+e.message);
+        setErr("❌ 接続エラー: "+e.message+"
+
+SafariのプライベートブラウジングがONの場合はOFFにしてお試しください。");
       }
     }
     setTesting(false);
